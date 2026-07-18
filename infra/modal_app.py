@@ -43,8 +43,14 @@ image = (
     .pip_install("uv")
     .add_local_file(str(LOCAL_ROOT / "pyproject.toml"), remote_path="/app/pyproject.toml", copy=True)
     .add_local_file(str(LOCAL_ROOT / "uv.lock"), remote_path="/app/uv.lock", copy=True)
-    .run_commands("cd /app && uv export --frozen --no-dev --format requirements-txt > /app/req.txt",
-                  "cd /app && uv pip install --system -r /app/req.txt")
+    # --no-emit-project drops the "-e ." line: the glc package is added to the
+    # image separately (at /root/glc), so we install only the pinned third-party
+    # deps here. --no-hashes keeps the install robust across index mirrors.
+    .run_commands(
+        "cd /app && uv export --frozen --no-dev --no-emit-project --no-hashes "
+        "--format requirements-txt > /app/req.txt",
+        "cd /app && uv pip install --system -r /app/req.txt",
+    )
     .env({
         "GLC_CONFIG_DIR": "/data/glc",
         "GLC_ISOLATED_PROVIDERS": "1",   # gateway holds no provider keys
