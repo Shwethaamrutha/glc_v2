@@ -43,7 +43,20 @@ def install_token_path() -> Path:
 
 def get_or_create_install_token() -> str:
     """Per-installation token used to authenticate WS adapter connections
-    and /v1/control/* requests. Generated once and persisted to disk."""
+    and /v1/control/* requests.
+
+    Leak 4 (invariant 2/4): in glc_v1 this token is written to
+    ~/.glc/install_token at mode 0600, which keeps out other Unix users but
+    NOT other code running as the same user — so any in-process adapter, or a
+    container that shares the config Volume, reads it. The structural fix is
+    component separation (the token belongs to the gateway alone). The concrete
+    hardening here: when GLC_INSTALL_TOKEN is provided (delivered as a Modal
+    Secret mounted ONLY into the gateway, never onto the shared Volume), use it
+    and never write it to disk. Only the legacy local path falls back to the
+    on-disk file."""
+    env_tok = os.getenv("GLC_INSTALL_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
     p = install_token_path()
     if p.exists():
         return p.read_text().strip()

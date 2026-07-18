@@ -230,7 +230,21 @@ class PairingStore:
     ) -> PairingRecord:
         """Out-of-band pairing for the installation owner. Used by the
         installer to bootstrap the first owner identity. Not exposed
-        through HTTP."""
+        through HTTP.
+
+        Leak 3 (invariant 2): because glc_v1 runs every adapter in the
+        gateway's process, any in-process caller could invoke this directly and
+        grant itself owner trust. The structural fix is component separation
+        (this method belongs to the installer alone). The concrete guard here:
+        refuse to run inside the serving gateway unless the process was
+        explicitly started in bootstrap mode (GLC_ALLOW_FORCE_PAIR=1). The
+        installer sets that flag for its one-shot run; the long-running gateway
+        never does, so an injected in-process call is denied."""
+        if os.getenv("GLC_ALLOW_FORCE_PAIR", "0").strip() != "1":
+            raise PermissionError(
+                "force_pair_owner is disabled in the serving gateway; run the "
+                "installer with GLC_ALLOW_FORCE_PAIR=1 to bootstrap the owner"
+            )
         paired_at = time.time()
         with _conn() as c:
             c.execute(

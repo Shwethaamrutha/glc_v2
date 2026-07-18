@@ -30,6 +30,9 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     # exercises v9 chat/embed semantics rather than the auth gate. The gate has
     # its own dedicated test (test_data_plane_auth.py) that turns it on.
     monkeypatch.setenv("GLC_REQUIRE_AUTH", "0")
+    # Tests act as the installer/bootstrap: allow force_pair_owner (leak 3
+    # guard defaults to denying it inside the serving gateway).
+    monkeypatch.setenv("GLC_ALLOW_FORCE_PAIR", "1")
 
     # Reset singletons that cache config-dir at first access.
     import glc.config as _cfg
