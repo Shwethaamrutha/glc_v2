@@ -263,14 +263,18 @@ tested topology on both boundaries:
 - **Provider boundary (invariant 1):** each provider key runs in its own worker
   with its own Secret + egress allowlist. `glc/provider_worker.py`,
   `glc/provider_broker.py`, `infra/modal_workers.py`.
-- **Adapter boundary (weak-isolation):** each contributed adapter runs in its
-  own container, holding only its own channel secret, with its own egress
-  allowlist — so a malicious/buggy adapter can no longer read a sibling's token,
-  the gateway's files, or signal the gateway's PID. Built as a worked example
-  for **Gmail** (`glc/adapter_worker.py`, `glc/adapter_broker.py`,
-  `infra/modal_adapters.py`); the remaining adapters follow the identical
-  template. In isolated mode (`GLC_ISOLATED_ADAPTERS=1`) the gateway imports and
-  runs no adapter code (verified by test).
+- **Adapter boundary (weak-isolation):** **every** contributed adapter (all 15:
+  gmail, telegram, discord, slack, whatsapp, twilio_sms, twilio_voice, line,
+  teams, matrix, signal, imap, webhook, webui, local_mic) runs in its own
+  container, holding only its own channel secret, with its own egress allowlist
+  — so a malicious/buggy adapter can no longer read a sibling's token, the
+  gateway's files, or signal the gateway's PID. A single registry
+  (`glc.adapter_broker.ADAPTER_REGISTRY`) declares each adapter's secrets,
+  egress hosts, and deps, and drives both the local subprocess backend and the
+  Modal deploy (`infra/modal_adapters.py`, one Function per adapter). In
+  isolated mode (`GLC_ISOLATED_ADAPTERS=1`) the gateway imports and runs no
+  adapter code (verified by test; a test also asserts every catalogue adapter
+  has an isolation config so none falls back to in-process).
 
 Plus honest defense-in-depth for leaks 3 and 4 (bootstrap-only `force_pair_owner`,
 install token via Secret). For leaks 5, 7, 8 no in-process code guard would be
@@ -280,11 +284,15 @@ above and documented here rather than papered over with theater.
 
 ### Adapter isolation, proven
 
-`adapter_gmail` on Modal ran the real Gmail adapter code inside its own
-container (reached `_get_client()` / `token.json` on mock creds) while the
-gateway held no Gmail secret. A unit test asserts the Gmail adapter module is
-NOT imported into the gateway process in isolated mode, and that the
-per-adapter secret reader never returns a sibling adapter's token.
+All 15 `adapter_<name>` Functions are deployed on Modal, each with its own
+Secret and egress allowlist. Verified live: `adapter_telegram` reached
+`api.telegram.org` with its own mock token (404, as expected), `adapter_gmail`
+reached `_get_client()`/`token.json`, `adapter_whatsapp` ran its pairing check —
+each inside its own container while the gateway held no adapter secret. Unit
+tests assert (a) the Gmail adapter module is NOT imported into the gateway
+process in isolated mode, (b) the per-adapter secret reader never returns a
+sibling adapter's token, and (c) every catalogue adapter has an isolation
+config so none silently runs in-process.
 
 ## Deploying the hardened topology
 
@@ -298,12 +306,11 @@ modal secret create glc-key-openrouter  OPEN_ROUTER_API_KEY=mock-not-real
 modal secret create glc-key-github      GITHUB_ACCESS_TOKEN=mock-not-real
 # gateway auth key (no provider keys on the gateway)
 modal secret create glc-gateway-auth    GLC_GATEWAY_API_KEY=<long-random>
-# per-adapter channel secret (Gmail worked example)
-modal secret create glc-adapter-gmail   GMAIL_OAUTH_CLIENT_ID=mock-not-real \
-    GMAIL_OAUTH_CLIENT_SECRET=mock-not-real GMAIL_BOT_ADDRESS=bot@example.com
+# per-adapter channel secrets (all 15, mock values, one Secret each)
+uv run python scripts/create_adapter_secrets.py --run
 
 modal deploy infra/modal_workers.py    # per-provider isolated workers
-modal deploy infra/modal_adapters.py   # per-adapter isolated Sandboxes (Gmail)
+modal deploy infra/modal_adapters.py   # per-adapter isolated Sandboxes (all 15)
 modal deploy infra/modal_app.py        # keyless gateway
 ```
 
