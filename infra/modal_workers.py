@@ -36,10 +36,12 @@ app = modal.App("glc-provider-workers")
 LOCAL_GLC = Path(__file__).parent.parent / "glc"
 
 # Minimal image: just what a provider call needs. Built from pinned versions.
+# The glc source is added per-worker AFTER the per-provider env, so the env
+# build step never follows add_local_dir (Modal requires local-file adds last).
 _base = (
-    modal.Image.debian_slim(python_version="3.11")
+    # Python must match the local interpreter used to deploy (serialized=True).
+    modal.Image.debian_slim(python_version="3.12")
     .pip_install("httpx>=0.27", "pydantic>=2.6", "pyyaml>=6.0", "jsonschema>=4.21")
-    .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
 )
 
 # Each provider's egress allowlist — the ONLY host its worker may reach.
@@ -58,11 +60,17 @@ def _make_worker(provider: str, secret_name: str):
     egress host. gVisor + outbound allowlist enforce the network wall; the
     single Secret enforces the key wall."""
 
+    worker_image = (
+        _base.env({"GLC_EGRESS_ALLOWLIST": _PROVIDER_HOSTS[provider]})
+        .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")  # local add last
+    )
+
     @app.function(
         name=f"chat_{provider}",
-        image=_base.env({"GLC_EGRESS_ALLOWLIST": _PROVIDER_HOSTS[provider]}),
+        image=worker_image,
         secrets=[modal.Secret.from_name(secret_name)],
         min_containers=0,
+        serialized=True,  # closures from _make_worker aren't at global scope
         # gVisor sandbox + per-Function egress allowlist: this worker can reach
         # only its provider's host, so a leaked/injected call cannot exfiltrate.
         # (Modal enforces outbound domains at the network namespace.)
