@@ -33,23 +33,109 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Per-adapter secret env var names: the credential(s) each adapter needs. Only
-# these are handed to that adapter's worker; never another adapter's.
-_ADAPTER_SECRET_ENV = {
-    "gmail": ["GMAIL_OAUTH_CLIENT_ID", "GMAIL_OAUTH_CLIENT_SECRET", "GMAIL_BOT_ADDRESS"],
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-adapter isolation registry. One entry per contributed adapter, declaring:
+#   secrets: the credential env var(s) THAT adapter needs — only these are ever
+#            handed to its worker, never a sibling's;
+#   egress:  the hosts that adapter's worker may reach (its channel's API only);
+#   pip:     extra deps beyond the base set (httpx/pydantic/pyyaml/jsonschema),
+#            so a bug in one adapter never pulls in another's dependencies.
+# This is the single source of truth for both the subprocess backend and the
+# Modal Sandbox deploy (infra/modal_adapters.py imports it).
+# ─────────────────────────────────────────────────────────────────────────────
+ADAPTER_REGISTRY: dict[str, dict[str, Any]] = {
+    "gmail": {
+        "secrets": ["GMAIL_OAUTH_CLIENT_ID", "GMAIL_OAUTH_CLIENT_SECRET", "GMAIL_BOT_ADDRESS",
+                    "GMAIL_PUBSUB_TOPIC", "GLC_GMAIL_OWNER"],
+        "egress": "gmail.googleapis.com,oauth2.googleapis.com,www.googleapis.com,accounts.google.com",
+        "pip": ["google-api-python-client>=2.0", "google-auth>=2.0", "google-auth-oauthlib>=1.0"],
+    },
+    "telegram": {
+        "secrets": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID"],
+        "egress": "api.telegram.org",
+        "pip": [],
+    },
+    "discord": {
+        "secrets": ["DISCORD_BOT_TOKEN", "DISCORD_TEST_CHANNEL_ID", "DISCORD_TEST_USER_ID"],
+        "egress": "discord.com,gateway.discord.gg",
+        "pip": [],
+    },
+    "slack": {
+        "secrets": ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"],
+        "egress": "api.slack.com,slack.com",
+        "pip": [],
+    },
+    "whatsapp": {
+        "secrets": ["WHATSAPP_TOKEN", "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN",
+                    "WHATSAPP_PHONE_NUMBER_ID", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN",
+                    "TWILIO_WHATSAPP_FROM"],
+        "egress": "graph.facebook.com,api.twilio.com",
+        "pip": ["python-dotenv>=1.0"],
+    },
+    "twilio_sms": {
+        "secrets": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER",
+                    "TWILIO_OWNER_NUMBER"],
+        "egress": "api.twilio.com",
+        "pip": ["python-dotenv>=1.0", "twilio>=9.0"],
+    },
+    "twilio_voice": {
+        "secrets": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"],
+        "egress": "api.twilio.com",
+        "pip": ["twilio>=9.0"],
+    },
+    "line": {
+        "secrets": ["LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET", "LINE_OWNER_USER_ID"],
+        "egress": "api.line.me",
+        "pip": [],
+    },
+    "teams": {
+        "secrets": ["TEAMS_APP_ID", "TEAMS_APP_PASSWORD", "TEAMS_TENANT_ID"],
+        "egress": "api.botframework.com,login.microsoftonline.com,smba.trafficmanager.net",
+        "pip": [],
+    },
+    "matrix": {
+        "secrets": ["MATRIX_HOMESERVER", "MATRIX_ACCESS_TOKEN", "MATRIX_BOT_MXID"],
+        "egress": "matrix.org",
+        "pip": [],
+    },
+    "signal": {
+        "secrets": ["SIGNAL_CLI_URL", "SIGNAL_PHONE_NUMBER"],
+        "egress": "",  # local signal-cli daemon; no fixed public host
+        "pip": [],
+    },
+    "imap": {
+        "secrets": ["IMAP_HOST", "IMAP_USER", "IMAP_PASSWORD", "SMTP_HOST", "SMTP_USER",
+                    "SMTP_PASSWORD"],
+        "egress": "",  # user-configured mail hosts; set per deployment
+        "pip": [],
+    },
+    "webhook": {
+        "secrets": ["WEBHOOK_SHARED_SECRET", "WEBHOOK_DEFAULT_TARGET_URL"],
+        "egress": "",  # target host is per-deployment; set explicitly
+        "pip": [],
+    },
+    "webui": {
+        "secrets": [],
+        "egress": "",  # browser client; no outbound
+        "pip": [],
+    },
+    "local_mic": {
+        "secrets": [],
+        "egress": "",  # local audio device; no outbound
+        "pip": [],
+    },
 }
 
-# Per-adapter egress allowlist (the hosts that adapter's worker may reach).
-ADAPTER_EGRESS = {
-    "gmail": "gmail.googleapis.com,oauth2.googleapis.com,www.googleapis.com",
-}
+# Back-compat views derived from the registry.
+_ADAPTER_SECRET_ENV = {name: cfg["secrets"] for name, cfg in ADAPTER_REGISTRY.items()}
+ADAPTER_EGRESS = {name: cfg["egress"] for name, cfg in ADAPTER_REGISTRY.items()}
 
 
 def isolated_adapters() -> list[str]:
     raw = os.getenv("GLC_ISOLATED_ADAPTER_LIST", "").strip()
     if raw:
         return [a.strip() for a in raw.split(",") if a.strip()]
-    return list(_ADAPTER_SECRET_ENV.keys())
+    return list(ADAPTER_REGISTRY.keys())
 
 
 class RemoteAdapter:

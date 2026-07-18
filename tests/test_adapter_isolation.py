@@ -13,6 +13,8 @@ import sys
 import pytest
 
 from glc.adapter_broker import (
+    ADAPTER_EGRESS,
+    ADAPTER_REGISTRY,
     RemoteAdapter,
     RemoteAdapterError,
     _read_adapter_secrets,
@@ -33,6 +35,34 @@ def test_build_remote_adapters_are_keyless():
     adapters = build_remote_adapters()
     assert "gmail" in adapters
     assert all(isinstance(a, RemoteAdapter) for a in adapters.values())
+
+
+def test_all_catalogue_adapters_are_in_registry():
+    # Every adapter that ships in the catalogue must have an isolation entry,
+    # so none silently falls back to running in the gateway process.
+    import glc.channels.registry as reg
+
+    catalogue = set(reg.list_channels())
+    registry = set(ADAPTER_REGISTRY)
+    missing = catalogue - registry
+    assert not missing, f"adapters with no isolation config: {sorted(missing)}"
+
+
+def test_every_registry_entry_has_secrets_egress_pip():
+    for name, cfg in ADAPTER_REGISTRY.items():
+        assert set(cfg) >= {"secrets", "egress", "pip"}, name
+        assert isinstance(cfg["secrets"], list)
+        assert isinstance(cfg["egress"], str)
+        assert isinstance(cfg["pip"], list)
+
+
+def test_egress_hosts_are_channel_specific():
+    # Spot-check that egress allowlists are the channel's own hosts, not a
+    # blanket allow — the whole point of per-adapter egress.
+    assert ADAPTER_EGRESS["telegram"] == "api.telegram.org"
+    assert "graph.facebook.com" in ADAPTER_EGRESS["whatsapp"]
+    assert "googleapis.com" in ADAPTER_EGRESS["gmail"]
+    assert "*" not in "".join(ADAPTER_EGRESS.values())
 
 
 def test_isolated_adapter_list_override(monkeypatch):
