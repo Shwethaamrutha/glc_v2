@@ -47,6 +47,9 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.audit.store as _a
 
     _a._singleton = None
+    import glc.security.budget as _b
+
+    _b.reset_budget_for_tests()
     yield
 
 

@@ -15,12 +15,20 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
 CODE_TTL_SECONDS = 5 * 60
+
+# C6: a 6-digit code has only 1,000,000 values, so an unthrottled confirm loop
+# brute-forces it in minutes. Cap wrong attempts per rolling window and lock
+# out further tries. Invariant 2 (an action must be checked against the actual
+# principal — a guessed code would pair an attacker as that principal).
+_MAX_CONFIRM_ATTEMPTS = 5
+_CONFIRM_LOCKOUT_SECONDS = 5 * 60
 
 
 def _resolve_path() -> str:
@@ -48,10 +56,35 @@ class PairingRecord:
     paired_at: float
 
 
+class PairingConfirmThrottled(Exception):
+    """Raised when pairing-code confirmation attempts exceed the limit (C6)."""
+
+
 class PairingStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # In-process attempt ledger: timestamps of recent failed confirms.
+        self._confirm_failures: deque[float] = deque()
+        self._locked_until: float = 0.0
         self._init_schema()
+
+    def _throttle_check(self) -> None:
+        now = time.time()
+        if now < self._locked_until:
+            raise PairingConfirmThrottled(
+                f"too many failed pairing attempts; locked for "
+                f"{int(self._locked_until - now)}s"
+            )
+        cutoff = now - _CONFIRM_LOCKOUT_SECONDS
+        while self._confirm_failures and self._confirm_failures[0] < cutoff:
+            self._confirm_failures.popleft()
+
+    def _record_failure(self) -> None:
+        now = time.time()
+        self._confirm_failures.append(now)
+        if len(self._confirm_failures) >= _MAX_CONFIRM_ATTEMPTS:
+            self._locked_until = now + _CONFIRM_LOCKOUT_SECONDS
+            self._confirm_failures.clear()
 
     def _init_schema(self) -> None:
         with _conn() as c:
@@ -96,15 +129,23 @@ class PairingStore:
         return code, expires_at
 
     def confirm_code(self, code: str) -> PairingRecord | None:
+        # C6: throttle brute-force. A wrong or expired code counts as a failed
+        # attempt; too many within the window locks out further tries.
+        with self._lock:
+            self._throttle_check()
         with _conn() as c:
             row = c.execute(
                 "SELECT * FROM pending_codes WHERE code=?",
                 (code,),
             ).fetchone()
             if row is None:
+                with self._lock:
+                    self._record_failure()
                 return None
             if row["expires_at"] < time.time():
                 c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
+                with self._lock:
+                    self._record_failure()
                 return None
             paired_at = time.time()
             c.execute(

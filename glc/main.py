@@ -32,6 +32,7 @@ from glc.routes import speak as speak_route  # noqa: E402
 from glc.routes import transcribe as transcribe_route  # noqa: E402
 from glc.routing import Router, RouterPool  # noqa: E402
 from glc.security.auth import require_api_key  # noqa: E402
+from glc.security.budget import enforce_budget  # noqa: E402
 
 PORT = int(os.getenv("GLC_PORT", "8111"))
 
@@ -103,7 +104,7 @@ app = FastAPI(
 # speak, and the read-only status/providers/capabilities/calls surfaces)
 # sits behind the gateway API key. The control plane and channel WS keep
 # their own install-token gates and are not double-gated here.
-_data_plane_auth = [Depends(require_api_key)]
+_data_plane_auth = [Depends(require_api_key), Depends(enforce_budget)]
 app.include_router(chat_route.router, dependencies=_data_plane_auth)
 app.include_router(transcribe_route.router, dependencies=_data_plane_auth)
 app.include_router(speak_route.router, dependencies=_data_plane_auth)

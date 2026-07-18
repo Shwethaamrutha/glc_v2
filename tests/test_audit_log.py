@@ -41,9 +41,10 @@ def test_store_exposes_no_update_or_delete():
     assert len([n for n in public if n in ("update", "delete", "modify")]) == 0
 
 
-def test_schema_version_is_one():
+def test_schema_version_is_two():
+    # Bumped to 2 when the tamper-evident hash-chain columns were added (leak 2).
     init_store()
-    assert schema_version() == 1
+    assert schema_version() == 2
 
 
 def test_query_filters_by_session_and_channel():

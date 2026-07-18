@@ -12,7 +12,13 @@ CREATE TABLE IF NOT EXISTS audit_log (
     tool            TEXT,
     policy_verdict  TEXT,
     params_json     TEXT,
-    result_json     TEXT
+    result_json     TEXT,
+    -- Leak 2 (invariant 7): tamper-evident hash chain. Each row commits to the
+    -- previous row's hash, so deleting or editing any row breaks the chain and
+    -- verify_chain() detects it. Filesystem write access no longer buys a
+    -- silent rewrite of history.
+    prev_hash       TEXT,
+    row_hash        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
@@ -25,4 +31,4 @@ CREATE TABLE IF NOT EXISTS audit_schema (
     version INTEGER PRIMARY KEY,
     applied_at REAL NOT NULL
 );
-INSERT OR IGNORE INTO audit_schema (version, applied_at) VALUES (1, strftime('%s','now'));
+INSERT OR IGNORE INTO audit_schema (version, applied_at) VALUES (2, strftime('%s','now'));

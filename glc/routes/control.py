@@ -15,7 +15,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from glc.config import get_or_create_install_token
-from glc.security.pairing import CODE_TTL_SECONDS, get_pairing_store
+from glc.security.pairing import CODE_TTL_SECONDS, PairingConfirmThrottled, get_pairing_store
 
 router = APIRouter()
 
@@ -63,7 +63,10 @@ async def pair(req: PairRequest, authorization: str | None = Header(default=None
 @router.post("/v1/control/pair/confirm")
 async def pair_confirm(req: PairConfirmRequest, authorization: str | None = Header(default=None)):
     _require_token(authorization)
-    rec = get_pairing_store().confirm_code(req.code)
+    try:
+        rec = get_pairing_store().confirm_code(req.code)
+    except PairingConfirmThrottled as e:
+        raise HTTPException(429, str(e)) from e
     if rec is None:
         raise HTTPException(404, "code unknown or expired")
     return {
@@ -94,6 +97,17 @@ async def presence(request: Request, authorization: str | None = Header(default=
         ],
         "uptime_s": int(time.time() - started),
     }
+
+
+@router.get("/v1/control/audit/verify")
+async def audit_verify(authorization: str | None = Header(default=None)):
+    """Leak 2: recompute the audit hash chain and report whether the log has
+    been tampered with. Install-token gated (control plane)."""
+    _require_token(authorization)
+    from glc.audit import verify_chain
+
+    ok, detail = verify_chain()
+    return {"intact": ok, "detail": detail}
 
 
 @router.post("/v1/control/kill")
