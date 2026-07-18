@@ -7,7 +7,15 @@ are rolled fresh.
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# A2: the OpenAPI schema and Swagger UI are disabled by default on public
+# deployments. The route-registration tests introspect /openapi.json, so the
+# suite opts docs back in. Set before glc.main is imported (module-level env
+# is read at app-construction time).
+os.environ.setdefault("GLC_ENABLE_DOCS", "1")
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +26,10 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     monkeypatch.setenv("GLC_AUDIT_DB", str(tmp_path / "audit.sqlite"))
     monkeypatch.setenv("GLC_PAIRING_DB", str(tmp_path / "pairings.sqlite"))
     monkeypatch.setenv("GLC_GATEWAY_DB", str(tmp_path / "gateway.sqlite"))
+    # Data-plane auth (finding A1) defaults off for the behaviour suite, which
+    # exercises v9 chat/embed semantics rather than the auth gate. The gate has
+    # its own dedicated test (test_data_plane_auth.py) that turns it on.
+    monkeypatch.setenv("GLC_REQUIRE_AUTH", "0")
 
     # Reset singletons that cache config-dir at first access.
     import glc.config as _cfg

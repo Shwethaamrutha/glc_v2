@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import HTMLResponse
 
 ROOT = Path(__file__).parent
@@ -31,8 +31,14 @@ from glc.routes import control as control_route  # noqa: E402
 from glc.routes import speak as speak_route  # noqa: E402
 from glc.routes import transcribe as transcribe_route  # noqa: E402
 from glc.routing import Router, RouterPool  # noqa: E402
+from glc.security.auth import require_api_key  # noqa: E402
 
 PORT = int(os.getenv("GLC_PORT", "8111"))
+
+# A2: disable the interactive docs / OpenAPI schema on public deployments so
+# the full route map, models, and rate limits are not handed to any caller.
+# Local dev keeps them by setting GLC_ENABLE_DOCS=1.
+_DOCS_ENABLED = os.getenv("GLC_ENABLE_DOCS", "0").strip() == "1"
 
 
 def _install_sighup_reload() -> None:
@@ -73,11 +79,22 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GLC v1 — Gateway for LLMs and Channels", lifespan=lifespan)
+app = FastAPI(
+    title="GLC v1 — Gateway for LLMs and Channels",
+    lifespan=lifespan,
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
+)
 
-app.include_router(chat_route.router)
-app.include_router(transcribe_route.router)
-app.include_router(speak_route.router)
+# A1/A2: every data-plane route (chat, vision, embed, batch, transcribe,
+# speak, and the read-only status/providers/capabilities/calls surfaces)
+# sits behind the gateway API key. The control plane and channel WS keep
+# their own install-token gates and are not double-gated here.
+_data_plane_auth = [Depends(require_api_key)]
+app.include_router(chat_route.router, dependencies=_data_plane_auth)
+app.include_router(transcribe_route.router, dependencies=_data_plane_auth)
+app.include_router(speak_route.router, dependencies=_data_plane_auth)
 app.include_router(control_route.router)
 app.include_router(channels_route.router)
 

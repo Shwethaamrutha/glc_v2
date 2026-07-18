@@ -18,7 +18,7 @@ import hmac
 import json
 import os
 
-from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from glc.audit import append as audit_append
@@ -33,15 +33,17 @@ router = APIRouter()
 
 
 @router.websocket("/v1/channels/{name}")
-async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+async def channel_ws(websocket: WebSocket, name: str):
+    # C3: the install token must arrive in the Authorization header only.
+    # The old ?token= query-string fallback landed the credential in access
+    # logs and proxy history (breaks invariant 4 — a credential must not leak
+    # into a place it can be replayed from). Header-only closes that path.
     header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     presented = None
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
-    elif token:
-        presented = token
     expected = get_or_create_install_token()
-    if presented != expected:
+    if not presented or not hmac.compare_digest(presented, expected):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -65,6 +67,25 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            # Leak 9 / C2: the declared channel must match the route the
+            # adapter connected on. Without this a Telegram adapter can send
+            # env.channel="discord" over WS /v1/channels/telegram and
+            # impersonate another channel. Breaks invariant 2 (the action is
+            # attributed to the wrong principal). Reject, record, and close.
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=env.trust_level,
+                    event_type="channel_spoof_rejected",
+                    result={"declared_channel": env.channel, "route": name},
+                )
+                await websocket.send_text(
+                    json.dumps({"error": f"envelope channel {env.channel!r} does not match route {name!r}"})
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
 
             ok, why = allowed(
                 env.channel,
