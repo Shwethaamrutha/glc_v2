@@ -9,6 +9,8 @@ separate append-only store under glc/audit/store.py.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import sqlite3
 import time
@@ -38,15 +40,39 @@ def _ensure_parent() -> None:
 # input_tokens=999_999_999 (or negatives) and corrupt every /v1/cost/by_agent
 # and budget calculation built on it. Breaks invariant 8 (cost accounting is
 # the basis of the hard spend limit) and invariant 7 (the ledger is a record).
-# We reject negatives and clamp each count to a sane per-call ceiling. This
-# does not stop an attacker with raw SQLite access (that needs the process
-# separation of the container split), but it closes the documented log_call
-# surface that all in-process callers reach.
+#
+# Two layers close this, matching the session's prescribed fix ("process
+# separation plus a signed writer that the gateway holds"):
+#   1. input validation — reject negative / non-int / absurd token counts, so
+#      the documented in-process log_call() poison is rejected at the door;
+#   2. a signed writer — each row carries an HMAC over its contents, keyed by a
+#      secret only the gateway process holds (GLC_LEDGER_SIGNING_KEY). A row
+#      forged via raw SQLite access (no key) fails verify_ledger(), so ledger
+#      tampering is detectable even below the application layer.
 _MAX_TOKENS_PER_CALL = 10_000_000
 
 
 class LedgerValidationError(ValueError):
     """Raised when a cost-ledger write carries impossible token counts."""
+
+
+def _signing_key() -> bytes:
+    """The gateway-held key that signs ledger rows. Delivered as a Secret
+    (GLC_LEDGER_SIGNING_KEY) in production; a stable per-DB fallback is derived
+    for local/dev so signing is always on. Only code in the gateway process has
+    this key — a raw-SQLite forger does not."""
+    k = os.getenv("GLC_LEDGER_SIGNING_KEY", "").strip()
+    if k:
+        return k.encode()
+    # Dev fallback: stable across a run, not committed anywhere.
+    return hashlib.sha256(f"glc-ledger-dev::{_db_path()}".encode()).digest()
+
+
+def _row_signature(fields: tuple) -> str:
+    """HMAC-SHA256 over the canonical row tuple. Any change to a signed field
+    (e.g. input_tokens forged via raw SQL) invalidates the signature."""
+    msg = "\x1f".join("" if v is None else str(v) for v in fields).encode()
+    return hmac.new(_signing_key(), msg, hashlib.sha256).hexdigest()
 
 
 def _validate_counts(**counts: int) -> None:
@@ -102,14 +128,28 @@ def init() -> None:
                 embed_dim INTEGER,
                 agent TEXT,
                 session TEXT,
-                retries INTEGER DEFAULT 0
+                retries INTEGER DEFAULT 0,
+                sig TEXT
             )"""
         )
+        # Defensive migration: add the signature column to a pre-existing DB.
+        cols = {r[1] for r in c.execute("PRAGMA table_info(calls)").fetchall()}
+        if "sig" not in cols:
+            c.execute("ALTER TABLE calls ADD COLUMN sig TEXT")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ts ON calls(ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_prov_ts ON calls(provider, ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_role_ts ON calls(call_role, ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_agent_ts ON calls(agent, ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_session_ts ON calls(session, ts DESC)")
+
+
+# The signed fields, in the exact order fed to _row_signature (must match
+# between log_call() and verify_ledger()).
+_SIGNED_FIELDS = (
+    "ts", "provider", "model", "input_tokens", "output_tokens",
+    "cache_create_tokens", "cache_read_tokens", "latency_ms", "status",
+    "prompt_chars", "response_chars", "call_role", "agent", "session",
+)
 
 
 def log_call(
@@ -142,6 +182,14 @@ def log_call(
         cache_create_tokens=cache_create_tokens,
         cache_read_tokens=cache_read_tokens,
     )
+    ts = time.time()
+    # Sign the row with the gateway-held key. The signed field values, in the
+    # order declared by _SIGNED_FIELDS.
+    sig = _row_signature((
+        ts, provider, model, input_tokens, output_tokens,
+        cache_create_tokens, cache_read_tokens, latency_ms, status,
+        prompt_chars, response_chars, call_role, agent, session,
+    ))
     with conn() as c:
         c.execute(
             """INSERT INTO calls (ts, provider, model, input_tokens, output_tokens,
@@ -149,10 +197,10 @@ def log_call(
                                   latency_ms, status, error, prompt_chars, response_chars,
                                   override, attempted, tool_calls, reasoning_applied, tool_dialect,
                                   call_role, router_decision, embed_dim,
-                                  agent, session, retries)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                  agent, session, retries, sig)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                time.time(),
+                ts,
                 provider,
                 model,
                 input_tokens,
@@ -175,6 +223,7 @@ def log_call(
                 agent,
                 session,
                 retries,
+                sig,
             ),
         )
 
@@ -248,3 +297,33 @@ def aggregate(call_role=None):
     with conn() as c:
         rows = c.execute(q, args).fetchall()
         return {r["provider"]: dict(r) for r in rows}
+
+
+def verify_ledger(limit: int | None = None) -> tuple[bool, str]:
+    """Leak 10: recompute each row's HMAC and report the first row whose
+    signature does not match — i.e. a row inserted or edited without the
+    gateway's signing key (raw-SQLite poisoning). Returns (ok, detail).
+
+    Rows with a NULL sig are pre-signing legacy rows and are reported as
+    unsigned rather than forged."""
+    q = "SELECT * FROM calls ORDER BY id ASC"
+    if limit:
+        q = f"SELECT * FROM (SELECT * FROM calls ORDER BY id DESC LIMIT {int(limit)}) ORDER BY id ASC"
+    unsigned = 0
+    with conn() as c:
+        try:
+            rows = c.execute(q).fetchall()
+        except sqlite3.OperationalError:
+            return True, "ledger empty"
+    for r in rows:
+        stored = r["sig"] if "sig" in r.keys() else None
+        if not stored:
+            unsigned += 1
+            continue
+        expected = _row_signature(tuple(r[f] for f in _SIGNED_FIELDS))
+        if not hmac.compare_digest(stored, expected):
+            return False, f"row id={r['id']}: signature mismatch (inserted/edited without the signing key)"
+    detail = f"all signed rows valid ({len(rows) - unsigned} signed"
+    if unsigned:
+        detail += f", {unsigned} unsigned legacy"
+    return True, detail + ")"

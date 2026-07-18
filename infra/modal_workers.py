@@ -74,6 +74,11 @@ def _make_worker(provider: str, secret_name: str):
         # gVisor sandbox + per-Function egress allowlist: this worker can reach
         # only its provider's host, so a leaked/injected call cannot exfiltrate.
         # (Modal enforces outbound domains at the network namespace.)
+        # Leak 7 hardening: strip ambient Modal API access so a compromised
+        # worker cannot use the platform credential to reach other functions or
+        # secrets. (Modal 1.5 has no read-only-root flag; this is the available
+        # blast-radius reduction.)
+        restrict_modal_access=True,
     )
     async def _worker(req: dict) -> dict:
         # Runs inside the isolated container. Only this provider's key is in env.

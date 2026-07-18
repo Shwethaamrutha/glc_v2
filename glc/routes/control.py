@@ -110,6 +110,18 @@ async def audit_verify(authorization: str | None = Header(default=None)):
     return {"intact": ok, "detail": detail}
 
 
+@router.get("/v1/control/ledger/verify")
+async def ledger_verify(authorization: str | None = Header(default=None)):
+    """Leak 10: verify the cost-ledger HMAC signatures and report whether any
+    row was inserted/edited without the gateway's signing key. Install-token
+    gated (control plane)."""
+    _require_token(authorization)
+    from glc import db
+
+    ok, detail = db.verify_ledger()
+    return {"intact": ok, "detail": detail}
+
+
 @router.post("/v1/control/kill")
 async def kill(request: Request, authorization: str | None = Header(default=None)):
     _require_token(authorization)

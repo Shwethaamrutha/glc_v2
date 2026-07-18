@@ -58,6 +58,10 @@ def _make_adapter(name: str, cfg: dict):
         secrets=[modal.Secret.from_name(f"glc-adapter-{name}")],
         min_containers=0,
         serialized=True,
+        # Leak 7 hardening: strip ambient Modal API access so a compromised
+        # adapter cannot use the platform credential to reach other functions or
+        # secrets, on top of gVisor + per-adapter egress allowlist.
+        restrict_modal_access=True,
     )
     async def _adapter(req: dict) -> dict:
         # Runs inside the isolated container. Only this adapter's secret is in
