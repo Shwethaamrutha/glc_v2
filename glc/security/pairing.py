@@ -31,8 +31,13 @@ _MAX_CONFIRM_ATTEMPTS = 5
 _CONFIRM_LOCKOUT_SECONDS = 5 * 60
 
 
+def _config_dir() -> Path:
+    return Path(os.getenv("GLC_CONFIG_DIR", os.path.expanduser("~/.glc")))
+
+
 def _resolve_path() -> str:
-    return os.getenv("GLC_PAIRING_DB", str(DEFAULT_DIR / "pairings.sqlite"))
+    # Honor GLC_CONFIG_DIR so pairings persist on the Modal Volume.
+    return os.getenv("GLC_PAIRING_DB", str(_config_dir() / "pairings.sqlite"))
 
 
 @contextmanager

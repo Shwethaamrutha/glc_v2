@@ -25,6 +25,7 @@ def test_rejects_non_int():
 
 def test_accepts_reasonable_counts():
     # A normal call still logs fine and is queryable.
+    db.init()
     db.log_call(provider="gemini", model="x", input_tokens=120, output_tokens=45, agent="ok")
     rows = db.recent(limit=5, provider="gemini")
     assert any(r["agent"] == "ok" for r in rows)

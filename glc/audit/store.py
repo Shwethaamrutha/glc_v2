@@ -31,13 +31,20 @@ def _row_hash(prev_hash: str, payload: dict[str, Any]) -> str:
     canonical = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256((prev_hash + canonical).encode()).hexdigest()
 
-DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
+def _config_dir() -> Path:
+    # Honor GLC_CONFIG_DIR (the migration points it at the Modal Volume) so the
+    # audit DB persists there, not on the throwaway container filesystem.
+    return Path(os.getenv("GLC_CONFIG_DIR", os.path.expanduser("~/.glc")))
+
+
+DEFAULT_DIR = _config_dir()
 
 
 def _resolve_path() -> str:
     """Resolve at call time, not import time, so tests that swap the env
-    var see the change."""
-    return os.getenv("GLC_AUDIT_DB", str(DEFAULT_DIR / "audit.sqlite"))
+    var see the change. Precedence: explicit GLC_AUDIT_DB, else the config
+    dir (GLC_CONFIG_DIR / the Modal Volume), else ~/.glc."""
+    return os.getenv("GLC_AUDIT_DB", str(_config_dir() / "audit.sqlite"))
 
 
 @contextmanager

@@ -15,12 +15,22 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
-DB_PATH = os.getenv("GLC_GATEWAY_DB", str(DEFAULT_DIR / "gateway.sqlite"))
+
+def _config_dir() -> Path:
+    return Path(os.getenv("GLC_CONFIG_DIR", os.path.expanduser("~/.glc")))
+
+
+def _db_path() -> str:
+    # Honor GLC_CONFIG_DIR so the ledger persists on the Modal Volume.
+    return os.getenv("GLC_GATEWAY_DB", str(_config_dir() / "gateway.sqlite"))
+
+
+# Back-compat module attribute (some callers/tests read db.DB_PATH).
+DB_PATH = _db_path()
 
 
 def _ensure_parent() -> None:
-    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    Path(_db_path()).parent.mkdir(parents=True, exist_ok=True)
 
 
 # Leak 10: log_call() previously wrote whatever token counts the caller
@@ -56,7 +66,7 @@ def _validate_counts(**counts: int) -> None:
 @contextmanager
 def conn():
     _ensure_parent()
-    c = sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(_db_path())
     c.row_factory = sqlite3.Row
     try:
         yield c
