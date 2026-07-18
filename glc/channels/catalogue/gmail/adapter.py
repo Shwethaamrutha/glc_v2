@@ -411,10 +411,23 @@ class Adapter(ChannelAdapter):
         return "file"
 
     def _extract_email(self, addr: str) -> str:
-        """Extract bare email from 'Display Name <email@x.com>' format."""
-        if "<" in addr and ">" in addr:
-            return addr.split("<")[1].split(">")[0]
-        return addr.strip()
+        """Extract the single sender address from a From header.
+
+        Trust and the allowlist key on this value, so it must be the message's
+        one true sender. The old naive split ("take whatever is inside the
+        first <>") mis-parsed multi-address or crafted headers: e.g.
+        'Owner <owner@x.com>, <attacker@evil.com>' resolved to owner@x.com,
+        so an email co-sent by an attacker was classified as the owner
+        (invariant 2). Use the stdlib address parser and require EXACTLY ONE
+        address; anything else returns "" (-> classify() yields untrusted),
+        because an ambiguous sender must never be resolved to a trusted one.
+        """
+        from email.utils import getaddresses
+
+        parsed = [a for _name, a in getaddresses([addr or ""]) if a]
+        if len(parsed) != 1:
+            return ""
+        return parsed[0].strip()
 
     # ──────────────────────────────────────────────────────────────────
     # Person 8 (Shwetha): Reply formatter
