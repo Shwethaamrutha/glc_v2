@@ -23,6 +23,36 @@ def _ensure_parent() -> None:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
 
+# Leak 10: log_call() previously wrote whatever token counts the caller
+# supplied, validating nothing, so a caller could poison the cost ledger with
+# input_tokens=999_999_999 (or negatives) and corrupt every /v1/cost/by_agent
+# and budget calculation built on it. Breaks invariant 8 (cost accounting is
+# the basis of the hard spend limit) and invariant 7 (the ledger is a record).
+# We reject negatives and clamp each count to a sane per-call ceiling. This
+# does not stop an attacker with raw SQLite access (that needs the process
+# separation of the container split), but it closes the documented log_call
+# surface that all in-process callers reach.
+_MAX_TOKENS_PER_CALL = 10_000_000
+
+
+class LedgerValidationError(ValueError):
+    """Raised when a cost-ledger write carries impossible token counts."""
+
+
+def _validate_counts(**counts: int) -> None:
+    for field, value in counts.items():
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise LedgerValidationError(f"{field} must be an int, got {value!r}")
+        if value < 0:
+            raise LedgerValidationError(f"{field} must be non-negative, got {value}")
+        if value > _MAX_TOKENS_PER_CALL:
+            raise LedgerValidationError(
+                f"{field}={value} exceeds per-call ceiling {_MAX_TOKENS_PER_CALL}"
+            )
+
+
 @contextmanager
 def conn():
     _ensure_parent()
@@ -96,6 +126,12 @@ def log_call(
     session=None,
     retries=0,
 ) -> None:
+    _validate_counts(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_create_tokens=cache_create_tokens,
+        cache_read_tokens=cache_read_tokens,
+    )
     with conn() as c:
         c.execute(
             """INSERT INTO calls (ts, provider, model, input_tokens, output_tokens,

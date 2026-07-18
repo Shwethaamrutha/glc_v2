@@ -69,9 +69,21 @@ async def lifespan(app: FastAPI):
     get_or_create_install_token()
     _install_sighup_reload()
     app.state.cache = GeminiCache(ttl_seconds=300)
-    app.state.providers = P.build_providers(app.state.cache)
+    # Leak 1 / A4 / invariant 1: in isolated mode the gateway holds NO provider
+    # keys. It builds keyless RemoteProviders that dispatch each call to a
+    # per-provider worker (subprocess locally, per-provider Modal Function with
+    # its own Secret + egress allowlist in production). build_providers(), which
+    # reads os.getenv("GEMINI_API_KEY") etc., is only used in the legacy
+    # single-process mode.
+    if os.getenv("GLC_ISOLATED_PROVIDERS", "0").strip() == "1":
+        from glc.provider_broker import build_remote_providers
+
+        app.state.providers = build_remote_providers()
+        app.state.router_providers = build_remote_providers()
+    else:
+        app.state.providers = P.build_providers(app.state.cache)
+        app.state.router_providers = P.build_router_providers()
     app.state.router = Router(app.state.providers, chat_route.ORDER)
-    app.state.router_providers = P.build_router_providers()
     app.state.router_pool = RouterPool(app.state.router_providers, chat_route.ROUTER_ORDER)
     app.state.embedders, app.state.embed_order = E.build_embedders()
     app.state.started_at = time.time()
