@@ -28,6 +28,7 @@ from glc.config import get_or_create_install_token
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
+from glc.security.trust_level import classify
 
 router = APIRouter()
 
@@ -65,6 +66,13 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            # Trust level is authority, and authority must never be self-declared
+            # by the sender. ChannelMessage.trust_level is a client-supplied
+            # field; re-derive it from the pairing store so a forged owner_paired
+            # cannot escalate a message's privilege (invariant 2 — every action
+            # checked against the ACTUAL principal, not a claimed one).
+            env.trust_level = classify(env.channel, env.channel_user_id)
 
             ok, why = allowed(
                 env.channel,
@@ -144,6 +152,11 @@ async def channel_webhook(name: str, request: Request):
     msg = await adapter.on_message(raw)
     if msg is None:
         return {"status": "ok"}
+
+    # Re-derive trust server-side (invariant 2): the trust_level the adapter put
+    # on the envelope is not authoritative. Classify from the pairing store
+    # using the route name and the sender id, ignoring any declared value.
+    msg.trust_level = classify(name, msg.channel_user_id)
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()
