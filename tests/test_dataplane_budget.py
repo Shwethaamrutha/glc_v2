@@ -4,9 +4,9 @@ daily request budget."""
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 from glc.security.budget import DataPlaneBudget
-from fastapi import HTTPException
 
 
 def test_per_caller_rate_limit():

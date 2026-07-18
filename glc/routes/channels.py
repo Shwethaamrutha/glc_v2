@@ -151,10 +151,24 @@ async def channel_webhook_verify(name: str, request: Request):
     raise HTTPException(status_code=403)
 
 
+def _get_adapter(name: str):
+    """Return the adapter to serve this channel. In isolated mode
+    (GLC_ISOLATED_ADAPTERS=1) return a keyless RemoteAdapter that dispatches to
+    the adapter's own container — the gateway process never imports or runs the
+    adapter's code, so a malicious/buggy adapter is confined to its own box.
+    Otherwise fall back to the legacy in-process instantiate()."""
+    if os.getenv("GLC_ISOLATED_ADAPTERS", "0").strip() == "1":
+        from glc.adapter_broker import RemoteAdapter, isolated_adapters
+
+        if name in isolated_adapters():
+            return RemoteAdapter(name)
+    return registry.instantiate(name)
+
+
 @router.post("/v1/channels/{name}/webhook")
 async def channel_webhook(name: str, request: Request):
     try:
-        adapter = registry.instantiate(name)
+        adapter = _get_adapter(name)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
 

@@ -4,7 +4,7 @@ string) on the WS /v1/channels/{name} route."""
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 from websockets.exceptions import ConnectionClosed
@@ -17,7 +17,7 @@ def _envelope(channel: str, text: str = "hi") -> dict:
         "user_handle": "u1",
         "text": text,
         "trust_level": "owner_paired",
-        "arrived_at": datetime.now(timezone.utc).isoformat(),
+        "arrived_at": datetime.now(UTC).isoformat(),
         "metadata": {},
     }
 

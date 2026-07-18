@@ -7,8 +7,6 @@ worker's environment. These tests assert exactly that boundary.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from glc import provider_broker
