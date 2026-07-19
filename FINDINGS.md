@@ -4,6 +4,14 @@ Each catalogued finding from Session 12 (Section 6 groups A/C, Section 7's ten
 leaks), the Section 4 invariant it breaks, the attacker role that reaches it,
 and how it is fixed in this repository.
 
+**Submission.** Branch `harden/session12-part1` on
+[Shwethaamrutha/glc_v2](https://github.com/Shwethaamrutha/glc_v2/tree/harden/session12-part1).
+12 commits, 310 tests pass, ruff clean. Deployed and verified live on Modal
+(workspace `shwetha-sd78`), including an end-to-end test with a real Gemini API
+key: the isolated per-provider worker reached Google with its own key while the
+gateway process held zero provider keys — invariant 1 proven on real
+infrastructure, not just asserted.
+
 ## The eight invariants (Section 4)
 
 1. Adapters must never see provider API keys.
@@ -48,7 +56,10 @@ The findings cluster into a handful of moves, all implemented here:
   data-plane router (`glc/main.py`). Bearer `GLC_GATEWAY_API_KEY`, constant-time
   compare, **fails closed** (503) if no key is configured. `/healthz` stays open.
 - **Verified live:** unauth `/v1/chat` → **401** (was 502); with key → 502
-  (clears the gate and reaches the provider layer).
+  (clears the gate and reaches the provider layer). Unit: `test_data_plane_auth.py`
+  (unauth 401, wrong-key 403, key required for `/v1/status`+`/v1/providers`,
+  `/docs`+`/openapi.json` disabled, `/healthz` stays open, fail-closed 503 on
+  unset key).
 
 ### A2 — Unauthenticated info disclosure + Swagger
 - **Invariant:** 2. **Attacker:** external.
@@ -84,9 +95,15 @@ The findings cluster into a handful of moves, all implemented here:
 ### A6 — Audit DB on a Volume with autoscale
 - **Invariant:** 7. **Attacker:** concurrency (not an actor).
 - **Was:** `min_containers=0` + autoscale → multiple containers → concurrent
-  SQLite writers → corrupted/split audit trail.
+  SQLite writers → corrupted/split audit trail. Compounded by a latent bug:
+  the audit, pairing, and gateway-call stores defaulted to `~/.glc/` and
+  **ignored `GLC_CONFIG_DIR`** — the variable the migration walkthrough sets
+  to point at the Modal Volume — so on Modal these DBs would land on the
+  throwaway container filesystem and vanish on every restart.
 - **Fix:** `infra/modal_app.py` sets `max_containers=1` so there is exactly one
   audit writer; the audit store commits each append (`isolation_level=None`).
+  `glc/audit/store.py`, `glc/db.py`, and `glc/security/pairing.py` now honor
+  `GLC_CONFIG_DIR` at call time so all three databases persist on the Volume.
   Combined with the hash chain (leak 2), a single ordered chain is maintained.
 
 ## Section 6 — Group C (inherited endpoint/logic issues, now internet-reachable)
@@ -217,11 +234,18 @@ The findings cluster into a handful of moves, all implemented here:
   argument **list**, never `shell=True` or `os.system`. The leak is a
   *capability*: any adapter can shell out and the monolithic image ships a
   shell.
-- **Fix (structural):** per-component minimal images + Sandbox isolation
-  (non-root, read-only FS, syscall filter, egress limits). The provider-worker
-  split establishes this; the whisper worker follows the same pattern. No
-  fabricated code guard, because there is no code bug to patch. **Documented,
-  structural.**
+- **Fix (structural):** per-component minimal images + gVisor sandbox (Modal's
+  `serialized=True` Functions run under gVisor by default — non-root, isolated
+  PID/mount namespaces, syscall shield), per-Function egress allowlists, and
+  **`restrict_modal_access=True`** on every provider worker and adapter
+  Function (`infra/modal_workers.py`, `infra/modal_adapters.py`). That last
+  flag strips the container's ambient Modal API credential, so a compromised
+  worker cannot use the platform token to reach other functions or Secrets.
+  Modal 1.5 has no read-only-root-FS flag, so the prescribed "read-only
+  filesystem" item is substituted by `restrict_modal_access` as the available
+  blast-radius reduction, on top of the other layers already in place. No
+  fabricated code guard, because there is no code bug to patch.
+  **Documented + structural + explicit hardening flag.**
 
 ### Leak 8 — Adapter kills the gateway directly
 - **Invariant:** 8. **Attacker:** any in-process code.
@@ -243,13 +267,27 @@ The findings cluster into a handful of moves, all implemented here:
 - **Verified:** `test_channel_ws_security.py::test_ws_rejects_channel_mismatch`.
 
 ### Leak 10 — Cost-ledger poisoning
-- **Invariant:** 7, 8. **Attacker:** any in-process code.
+- **Invariant:** 7, 8. **Attacker:** any in-process code (application-layer)
+  and anyone with raw SQLite access (deployment-layer).
 - **Was:** `glc.db.log_call(... input_tokens=999_999_999 ...)` validated
   nothing, corrupting cost/budget accounting.
-- **Fix:** `log_call` rejects non-int, negative, and absurd (>10M) token counts
-  (`LedgerValidationError`) before writing (`glc/db.py`). (Raw SQLite access is
-  closed by the same process separation as leak 2.)
-- **Verified:** `test_cost_ledger.py`.
+- **Fix:** matches the session's prescribed "process separation plus a signed
+  writer that the gateway holds", in two independent layers:
+    1. **Input validation** — `log_call` rejects non-int, negative, and absurd
+       (>10M) token counts (`LedgerValidationError`) at the app-layer entry
+       point, so the documented in-process poison is refused at the door.
+    2. **Signed writer (HMAC-SHA256)** — each ledger row carries an HMAC over
+       its signed fields (`ts, provider, model, input_tokens, output_tokens,
+       cache_*_tokens, latency_ms, status, prompt_chars, response_chars,
+       call_role, agent, session`), keyed by `GLC_LEDGER_SIGNING_KEY` which
+       only the gateway process holds. A row forged or edited via raw SQLite
+       access (no key) fails signature verification. Verifiable at
+       `GET /v1/control/ledger/verify` (install-token gated), which reports
+       the first row whose signature doesn't match. `sig` column added with
+       a defensive `ALTER TABLE` migration.
+- **Verified:** `test_cost_ledger.py` — validation rejects poison, signature
+  detects both a raw-SQL `UPDATE` of an existing row and a fully forged
+  `INSERT` (7 cases total).
 
 ---
 
@@ -289,10 +327,12 @@ Secret and egress allowlist. Verified live: `adapter_telegram` reached
 `api.telegram.org` with its own mock token (404, as expected), `adapter_gmail`
 reached `_get_client()`/`token.json`, `adapter_whatsapp` ran its pairing check —
 each inside its own container while the gateway held no adapter secret. Unit
-tests assert (a) the Gmail adapter module is NOT imported into the gateway
-process in isolated mode, (b) the per-adapter secret reader never returns a
-sibling adapter's token, and (c) every catalogue adapter has an isolation
-config so none silently runs in-process.
+tests (`test_adapter_isolation.py`, 9 cases) assert (a) the Gmail adapter
+module is NOT imported into the gateway process in isolated mode, (b) the
+per-adapter secret reader never returns a sibling adapter's token (proven
+against a planted `SLACK-SECRET-LEAK` in a `slack/` secret dir), (c) every
+catalogue adapter has an isolation config so none silently runs in-process,
+(d) each adapter's egress allowlist is channel-specific (no wildcards).
 
 ## Deploying the hardened topology
 
