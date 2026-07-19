@@ -1,5 +1,7 @@
 # glc_v2 — Session 12 reference repository
 
+> **This branch (`harden/session12-part1`) is a Part 1 submission** — glc_v2 with every Section 6 and Section 7 finding addressed. See [`FINDINGS.md`](FINDINGS.md) for the issue → invariant → fix → test mapping and the deploy recipe. 12 commits, 310 tests pass, ruff clean, deployed on Modal.
+
 This is the reference repository for **Part 2** of the Session 12 assignment. It is the glc gateway (the Session 11 `glc_v1` code plus the Modal wrapper `modal_app.py`), left with its security flaws in place on purpose. It is the shared target you open pull requests against when you find a new bug.
 
 ## The assignment in one screen
@@ -19,6 +21,8 @@ uv run glc serve        # gateway on http://localhost:8111
 ```
 
 To deploy on Modal, see `modal_app.py` and Session 12 Section 6. Use mock keys only, and never put real provider keys on Modal.
+
+For the hardened Part 1 topology (per-provider workers, per-adapter Sandboxes, keyless gateway), see `infra/modal_workers.py`, `infra/modal_adapters.py`, `infra/modal_app.py`, and the deploy recipe at the end of [`FINDINGS.md`](FINDINGS.md).
 
 ## Where to look
 
